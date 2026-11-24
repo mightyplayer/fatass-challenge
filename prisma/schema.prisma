@@ -1,0 +1,300 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PENDING // вошёл, но ещё не выбрал роль
+  FAN // болельщик
+  PARTICIPANT // участник соревнования
+}
+
+enum DonationStatus {
+  AWAITING_TRANSFER // болельщик создал донат, но ещё не перевёл
+  PENDING_REVIEW // болельщик нажал «Я перевёл», ждёт проверки админом
+  CONFIRMED // админ подтвердил, что деньги пришли
+  REJECTED // админ отклонил
+  CANCELLED // болельщик отменил до перевода
+}
+
+enum ChallengeStatus {
+  AWAITING_PAYMENT // болельщик создал, но ещё не перевёл вознаграждение хранителю
+  PAYMENT_REVIEW // болельщик нажал «Я перевёл», хранитель проверяет
+  PAYMENT_REJECTED // хранитель не нашёл перевод
+  PENDING // оплачен, ждёт ответа участника
+  ACCEPTED
+  DECLINED
+  COMPLETION_REVIEW // участник отметил выполнение, админ проверяет
+  COMPLETED
+  FAILED
+  CANCELLED // автор удалил челлендж после оплаты, вознаграждение возвращается
+}
+
+model User {
+  id         String   @id @default(cuid())
+  telegramId BigInt   @unique
+  name       String
+  username   String?
+  avatarUrl  String?
+  role       Role     @default(PENDING)
+  isAdmin    Boolean  @default(false) // назначает супер-админ; вносит результаты
+  createdAt  DateTime @default(now())
+
+  // поля участника
+  startWeight    Float?
+  goalWeight     Float?
+  heightCm       Int?
+  motto          String?
+  // реквизиты для донатов: телефон для СБП и банк; заполняет участник или админ
+  sbpPhone       String?
+  sbpBank        String?
+  // старые реквизиты одной строкой, показываются, если СБП не заполнен
+  paymentDetails String?
+
+  results            WeeklyResult[]
+  resultsEntered     WeeklyResult[]     @relation("ResultEnteredBy")
+  posts              Post[]
+  comments           Comment[]
+  likes              Like[]
+  postReactions      PostReaction[]
+  challengesCreated  Challenge[]        @relation("ChallengeAuthor")
+  challengesReceived Challenge[]        @relation("ChallengeTarget")
+  donationsMade      Donation[]         @relation("DonationFrom")
+  donationsReceived  Donation[]         @relation("DonationTo")
+  votesCast          Vote[]             @relation("VoteFan")
+  votesReceived      Vote[]             @relation("VoteParticipant")
+  predictionsMade    Prediction[]       @relation("PredictionAuthor")
+  predictionsAbout   Prediction[]       @relation("PredictionTarget")
+  donationsReviewed  Donation[]         @relation("DonationReviewer")
+  fundKept           PrizeFund[]        @relation("FundKeeper")
+  fundContributions  FundContribution[] @relation("FundContributionFrom")
+  fundReviewed       FundContribution[] @relation("FundContributionReviewer")
+  challengesPaid     Challenge[]        @relation("ChallengePaidBy")
+  challengesReviewed Challenge[]        @relation("ChallengeReviewer")
+  challengesSettled  Challenge[]        @relation("ChallengeSettledBy")
+}
+
+// Результат участника за неделю. Вносит и правит админ, одна запись на неделю.
+// week = 0 — старт (вес и талия), 1..N — еженедельные отчёты, N+1 — финал (вес и талия).
+model WeeklyResult {
+  id               String   @id @default(cuid())
+  participantId    String
+  enteredById      String?
+  week             Int
+  weight           Float
+  waistCm          Float?
+  stepsDays        Int      @default(0) // дней с 10 000+ шагов
+  cardioDays       Int      @default(0) // дней с кардио 60+ минут
+  strengthSessions Int      @default(0) // силовых тренировок 45+ минут
+  penalty          Int      @default(0) // штрафные баллы
+  note             String?
+  photoUrl         String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  participant User   @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  enteredBy   User?  @relation("ResultEnteredBy", fields: [enteredById], references: [id], onDelete: SetNull)
+  likes       Like[]
+
+  @@unique([participantId, week])
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  authorId  String
+  text      String
+  createdAt DateTime @default(now())
+
+  author    User           @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  images    PostImage[]
+  likes     Like[]
+  comments  Comment[]
+  reactions PostReaction[]
+
+  @@index([createdAt])
+}
+
+enum ReactionKind {
+  CLOWN
+  POOP
+  FIRE
+  THUMBS_UP
+  THUMBS_DOWN
+}
+
+// Реакция на пост вдобавок к лайку: каждую можно поставить и снять отдельно.
+model PostReaction {
+  id        String       @id @default(cuid())
+  userId    String
+  postId    String
+  kind      ReactionKind
+  createdAt DateTime     @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId, kind])
+  @@index([postId])
+}
+
+// Комментарий к посту. parentId — ответ на другой комментарий, так строится дерево.
+// Удалённый комментарий с ответами остаётся пустым (deletedAt), чтобы ветка не рвалась.
+model Comment {
+  id        String    @id @default(cuid())
+  postId    String
+  authorId  String
+  parentId  String?
+  text      String
+  createdAt DateTime  @default(now())
+  deletedAt DateTime?
+
+  post    Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author  User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[] @relation("CommentReplies")
+
+  @@index([postId, createdAt])
+  @@index([parentId])
+}
+
+model PostImage {
+  id     String @id @default(cuid())
+  postId String
+  url    String
+  order  Int    @default(0)
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+}
+
+// Доп. челлендж: создаёт болельщик с вознаграждением, переводит его хранителю фонда по СБП.
+// После подтверждения оплаты участник принимает или отклоняет. Выполнение подтверждает админ,
+// затем хранитель переводит вознаграждение участнику, а при отказе, невыполнении или удалении — возвращает автору.
+model Challenge {
+  id            String          @id @default(cuid())
+  authorId      String
+  targetId      String
+  title         String
+  description   String?
+  dueDate       DateTime?
+  reward        Int             @default(0) // в рублях; у старых бесплатных челленджей — 0
+  status        ChallengeStatus @default(PENDING) // новые создаются в AWAITING_PAYMENT
+  transferredAt DateTime? // болельщик отметил перевод
+  paidAt        DateTime? // хранитель подтвердил, что деньги пришли
+  paidById      String?
+  respondedAt   DateTime?
+  reviewedById  String? // админ, проверивший выполнение
+  settledAt     DateTime? // хранитель выплатил участнику или вернул автору
+  settledById   String?
+  createdAt     DateTime        @default(now())
+
+  author     User   @relation("ChallengeAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  target     User   @relation("ChallengeTarget", fields: [targetId], references: [id], onDelete: Cascade)
+  paidBy     User?  @relation("ChallengePaidBy", fields: [paidById], references: [id], onDelete: SetNull)
+  reviewedBy User?  @relation("ChallengeReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  settledBy  User?  @relation("ChallengeSettledBy", fields: [settledById], references: [id], onDelete: SetNull)
+  likes      Like[]
+
+  @@index([targetId, status])
+}
+
+// Донат болельщика участнику ручным переводом по реквизитам; админ подтверждает получение.
+model Donation {
+  id            String         @id @default(cuid())
+  fromId        String
+  toId          String
+  amount        Int // в рублях
+  message       String?
+  status        DonationStatus @default(AWAITING_TRANSFER)
+  transferredAt DateTime?
+  reviewedById  String?
+  reviewedAt    DateTime?
+  reviewNote    String?
+  createdAt     DateTime       @default(now())
+
+  from       User  @relation("DonationFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to         User  @relation("DonationTo", fields: [toId], references: [id], onDelete: Cascade)
+  reviewedBy User? @relation("DonationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+}
+
+// Ставка участника на финальный вес другого участника. Скрыта до финала.
+model Prediction {
+  id        String   @id @default(cuid())
+  authorId  String
+  targetId  String
+  weight    Float
+  updatedAt DateTime @updatedAt
+
+  author User @relation("PredictionAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  target User @relation("PredictionTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([authorId, targetId])
+}
+
+// Постоянный голос болельщика за фаворита: один на болельщика, можно перенести или снять.
+model Vote {
+  id            String   @id @default(cuid())
+  fanId         String   @unique
+  participantId String
+  createdAt     DateTime @default(now())
+
+  fan         User @relation("VoteFan", fields: [fanId], references: [id], onDelete: Cascade)
+  participant User @relation("VoteParticipant", fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@index([participantId])
+}
+
+// Лайк на активность: пост, недельный отчёт или челлендж.
+model Like {
+  id          String   @id @default(cuid())
+  userId      String
+  postId      String?
+  resultId    String?
+  challengeId String?
+  createdAt   DateTime @default(now())
+
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post?         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  result    WeeklyResult? @relation(fields: [resultId], references: [id], onDelete: Cascade)
+  challenge Challenge?    @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@unique([userId, resultId])
+  @@unique([userId, challengeId])
+}
+
+// Призовой фонд соревнования, одна запись (id = "main"). Базу и хранителя задаёт супер-админ.
+// Хранитель — админ, на чей телефон болельщики переводят деньги по СБП и кто подтверждает взносы.
+model PrizeFund {
+  id         String   @id @default("main")
+  baseAmount Int      @default(0) // в рублях
+  keeperId   String?
+  sbpPhone   String?
+  sbpBank    String?
+  updatedAt  DateTime @updatedAt
+
+  keeper User? @relation("FundKeeper", fields: [keeperId], references: [id], onDelete: SetNull)
+}
+
+// Взнос болельщика в призовой фонд переводом по СБП хранителю; хранитель подтверждает получение.
+model FundContribution {
+  id            String         @id @default(cuid())
+  fromId        String
+  amount        Int // в рублях
+  message       String?
+  status        DonationStatus @default(AWAITING_TRANSFER)
+  transferredAt DateTime?
+  reviewedById  String?
+  reviewedAt    DateTime?
+  createdAt     DateTime       @default(now())
+
+  from       User  @relation("FundContributionFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  reviewedBy User? @relation("FundContributionReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+}

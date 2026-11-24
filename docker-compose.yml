@@ -1,0 +1,51 @@
+# Всё в одном compose: Postgres, приложение и Caddy с HTTPS.
+# Имя проекта зафиксировано: от него зависят имена volumes с БД и картинками.
+name: fatass-challenge
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slim
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: slim
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slim"]
+      interval: 5s
+      retries: 10
+
+  app:
+    image: ${APP_IMAGE:-fatass-challenge-app}
+    build: .
+    restart: unless-stopped
+    env_file: ${ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: postgresql://slim:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/slim
+      TZ: Europe/Samara
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - uploads:/app/uploads
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:
+  pgdata:
+  uploads:

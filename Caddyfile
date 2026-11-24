@@ -1,0 +1,6 @@
+# HTTPS с автоматическим сертификатом Let's Encrypt.
+# DOMAIN — ваш домен или, если его нет, <ip-сервера>.sslip.io
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:3000
+}
